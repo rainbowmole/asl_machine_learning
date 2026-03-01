@@ -10,8 +10,9 @@ import time
 from collections import deque
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-MODEL_PATH  = 'asl_landmark_model.keras'
-LABELS_PATH = 'label_classes.npy'
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH  = os.path.join(BASE_DIR, 'asl_landmark_model.keras')
+LABELS_PATH = os.path.join(BASE_DIR, 'label_classes.npy')
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found. Run train_landmark_asl.py first.")
 if not os.path.exists(LABELS_PATH):
@@ -68,19 +69,37 @@ def extract_features(lm):
 # --- MediaPipe hand tracking setup ---
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
-hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+hands = mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.75,
+    min_tracking_confidence=0.75
+)
 
 # --- Camera setup ---
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 if not cap.isOpened():
     raise RuntimeError("Could not open webcam.")
+
+# ── Monochrome UI Colors (BGR) ───────────────────────────────────────────────
+CYAN      = (220, 220, 220)   # primary white
+CYAN_DIM  = (130, 130, 130)   # mid gray
+CYAN_DARK = ( 45,  45,  45)   # dark fill / inactive
+ORANGE    = (180, 180, 180)   # neutral gray (was orange for negative)
+
+def draw_jarvis_corners(img, x1, y1, x2, y2, color, length=22, thickness=2):
+    """Corner-bracket box instead of a full rectangle."""
+    for px, py, sx, sy in [(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
+        cv2.line(img, (px, py), (px + sx*length, py), color, thickness)
+        cv2.line(img, (px, py), (px, py + sy*length), color, thickness)
 
 sentence = ""
 sentiment_display = ""
 letter = "?"
 confidence = 0.0
 
-BUFFER_SIZE = 15
+BUFFER_SIZE = 20  # increased for more stable averaging
 prediction_buffer = []
 CONFIDENCE_THRESHOLD = 0.82
 
@@ -112,16 +131,29 @@ while True:
     frame = cv2.flip(frame, 1)
     h, w = frame.shape[:2]
 
-    # --- MediaPipe hand detection ---
+    # --- Color display; detection on original RGB for accuracy ---
+    display = frame.copy()
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = hands.process(rgb)
 
     hand_detected = False
+    UI_HEIGHT  = 140
+    TOP_HEIGHT = 40
+
+    # Corner decorations on video frame
+    CL = 28
+    for cx, cy, sx, sy in [(0,0,1,1),(w-1,0,-1,1),(0,h-1,1,-1),(w-1,h-1,-1,-1)]:
+        cv2.line(display, (cx, cy), (cx + sx*CL, cy), CYAN, 2)
+        cv2.line(display, (cx, cy), (cx, cy + sy*CL), CYAN, 2)
 
     if result.multi_hand_landmarks:
         hand_detected = True
         hand_landmarks = result.multi_hand_landmarks[0]
-        mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        mp_draw.draw_landmarks(
+            display, hand_landmarks, mp_hands.HAND_CONNECTIONS,
+            mp_draw.DrawingSpec(color=CYAN, thickness=2, circle_radius=3),
+            mp_draw.DrawingSpec(color=CYAN_DIM, thickness=1)
+        )
 
         lm = hand_landmarks.landmark
 
@@ -159,8 +191,18 @@ while True:
                 letter = 'Z'
 
         display_letter = letter if confidence >= CONFIDENCE_THRESHOLD else "?"
-        cv2.putText(frame, f'Sign: {display_letter} ({confidence:.0%})',
-                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # Corner-bracket bounding box
+        x_coords = [lm[i].x * w for i in range(21)]
+        y_coords = [lm[i].y * h for i in range(21)]
+        bx1 = max(0, int(min(x_coords)) - 30)
+        by1 = max(0, int(min(y_coords)) - 30)
+        bx2 = min(w, int(max(x_coords)) + 30)
+        by2 = min(h, int(max(y_coords)) + 30)
+        box_color = CYAN if confidence >= CONFIDENCE_THRESHOLD else CYAN_DIM
+        draw_jarvis_corners(display, bx1, by1, bx2, by2, box_color)
+        label = f'[ {display_letter} ]  {confidence:.0%}'
+        cv2.putText(display, label, (bx1, max(by1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, box_color, 2, cv2.LINE_AA)
 
         # ── Dwell-timer logic ──────────────────────────────────────────────
         now = time.time()
@@ -173,14 +215,14 @@ while True:
                 dwell_start  = now
 
             elapsed = now - dwell_start
-            # Draw filling arc to show dwell progress
+            # Dwell arc — B&W palette
             frac    = min(elapsed / DWELL_TIME, 1.0)
             angle   = int(frac * 360)
             center  = (w - 55, 55)
-            cv2.ellipse(frame, center, (30, 30), -90, 0, angle,
-                        (0, 255, 180), 4)
-            cv2.putText(frame, display_letter, (w - 67, 65),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 180), 2)
+            cv2.ellipse(display, center, (32, 32), -90, 0, 360, CYAN_DARK, 4)
+            cv2.ellipse(display, center, (32, 32), -90, 0, angle, CYAN, 4)
+            cv2.putText(display, display_letter, (w - 67, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, CYAN, 2, cv2.LINE_AA)
 
             # Auto-add when dwell threshold reached
             cooldown_ok = (now - last_add_time) >= COOLDOWN_TIME
@@ -205,8 +247,10 @@ while True:
         motion_history.clear()
         dwell_letter = None
         dwell_start  = None
-        cv2.putText(frame, 'No hand detected',
-                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        confidence   = 0.0
+        letter       = "?"
+        cv2.putText(display, '[ NO HAND DETECTED ]',
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, CYAN_DIM, 1, cv2.LINE_AA)
 
         # ── Auto-space when hand is absent long enough ─────────────────────
         now = time.time()
@@ -219,27 +263,84 @@ while True:
                 no_hand_since = now   # reset so it doesn't spam
                 print(f"[AUTO] Space inserted | Sentence: '{sentence}'")
 
-    # --- Draw UI ---
-    cv2.putText(frame, f'Sentence: {sentence}',
-                (10, h - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    # ── JARVIS Top Bar ───────────────────────────────────────────────────────
+    top_bar = np.zeros((TOP_HEIGHT, w, 3), dtype=np.uint8)
+    cv2.rectangle(top_bar, (0, 0), (w, TOP_HEIGHT), (8, 6, 2), -1)
+    cv2.line(top_bar, (0, TOP_HEIGHT - 1), (w, TOP_HEIGHT - 1), CYAN_DIM, 1)
+    cv2.line(top_bar, (0, 0), (260, 0), CYAN, 2)
+    cv2.putText(top_bar, '[ ASL INTERFACE v2.0 ]', (10, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62, CYAN, 2, cv2.LINE_AA)
+    ts = time.strftime('%H:%M:%S')
+    cv2.putText(top_bar, ts, (w - 95, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.58, CYAN_DIM, 1, cv2.LINE_AA)
+    status_col = CYAN if hand_detected else CYAN_DARK
+    status_txt = 'TRACKING' if hand_detected else 'SCANNING'
+    cv2.circle(top_bar, (w - 145, 19), 5, status_col, -1)
+    cv2.putText(top_bar, status_txt, (w - 135, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, status_col, 1, cv2.LINE_AA)
 
+    # ── JARVIS Bottom Panel ──────────────────────────────────────────────────
+    panel = np.zeros((UI_HEIGHT, w, 3), dtype=np.uint8)
+    cv2.rectangle(panel, (0, 0), (w, UI_HEIGHT), (8, 6, 2), -1)
+    cv2.line(panel, (0, 0), (w, 0), CYAN, 2)
+    cv2.line(panel, (0, 2), (w, 2), CYAN_DARK, 1)
+
+    # Divider: right column for confidence + letter
+    div_x = w - 230
+    cv2.line(panel, (div_x, 10), (div_x, UI_HEIGHT - 10), CYAN_DARK, 1)
+
+    # OUTPUT label + sentence
+    cv2.putText(panel, 'OUTPUT', (12, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, CYAN_DIM, 1, cv2.LINE_AA)
+    cv2.line(panel, (12, 21), (75, 21), CYAN_DARK, 1)
+    sentence_show = (sentence[-55:] if len(sentence) > 55 else sentence) or '_'
+    cv2.putText(panel, sentence_show, (12, 48),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, CYAN, 2, cv2.LINE_AA)
+
+    # Sentiment
     if sentiment_display:
-        color = (0, 255, 0) if "POSITIVE" in sentiment_display else \
-                (0, 0, 255) if "NEGATIVE" in sentiment_display else (200, 200, 200)
-        cv2.putText(frame, sentiment_display,
-                    (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        s_color = CYAN if 'POSITIVE' in sentiment_display else \
+                  ORANGE if 'NEGATIVE' in sentiment_display else CYAN_DIM
+        cv2.putText(panel, sentiment_display, (12, 78),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, s_color, 1, cv2.LINE_AA)
 
-    # Dwell progress bar at bottom (only when tracking)
+    # Controls hint
+    cv2.putText(panel, '[A] ADD   [S] ANALYSE   [C] CLEAR   [Q] QUIT',
+                (12, UI_HEIGHT - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (50, 50, 12), 1, cv2.LINE_AA)
+
+    # Dwell progress bar
     if dwell_start is not None and confidence >= CONFIDENCE_THRESHOLD:
         frac = min((time.time() - dwell_start) / DWELL_TIME, 1.0)
-        bar_w = int((w - 40) * frac)
-        cv2.rectangle(frame, (20, h - 8), (w - 20, h - 3), (50, 50, 50), -1)
-        cv2.rectangle(frame, (20, h - 8), (20 + bar_w, h - 3), (0, 255, 180), -1)
+        dw = int((div_x - 24) * frac)
+        cv2.rectangle(panel, (12, 95), (div_x - 12, 108), CYAN_DARK, -1)
+        cv2.rectangle(panel, (12, 95), (12 + dw, 108), CYAN, -1)
+        cv2.rectangle(panel, (12, 95), (div_x - 12, 108), CYAN_DIM, 1)
+        cv2.putText(panel, 'DWELL', (12, 123),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, CYAN_DIM, 1, cv2.LINE_AA)
 
-    cv2.putText(frame, "A=Add(manual)  S=Sentiment  C=Clear  Q=Quit",
-                (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+    # Right: segmented confidence meter
+    cv2.putText(panel, 'CONFIDENCE', (div_x + 10, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, CYAN_DIM, 1, cv2.LINE_AA)
+    n_segs, seg_w, seg_h, seg_gap = 10, 16, 20, 4
+    seg_ox, seg_oy = div_x + 10, 26
+    filled_segs = int(n_segs * min(confidence, 1.0))
+    for i in range(n_segs):
+        sx = seg_ox + i * (seg_w + seg_gap)
+        col = CYAN if i < filled_segs else CYAN_DARK
+        cv2.rectangle(panel, (sx, seg_oy), (sx + seg_w, seg_oy + seg_h), col, -1)
+    conf_col = CYAN if confidence >= CONFIDENCE_THRESHOLD else CYAN_DIM
+    cv2.putText(panel, f'{confidence:.0%}', (div_x + 10, seg_oy + seg_h + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, conf_col, 2, cv2.LINE_AA)
 
-    cv2.imshow('ASL Sentiment Analyzer', frame)
+    # Large letter display (right column)
+    cv2.putText(panel, letter, (div_x + 140, 110),
+                cv2.FONT_HERSHEY_DUPLEX, 2.8,
+                CYAN if confidence >= CONFIDENCE_THRESHOLD else CYAN_DARK,
+                3, cv2.LINE_AA)
+
+    combined = np.vstack([top_bar, display, panel])
+    cv2.imshow('ASL SENTINEL', combined)
 
     key = cv2.waitKey(1) & 0xFF
 
@@ -264,7 +365,7 @@ while True:
                 sentiment = "NEGATIVE"
             else:
                 sentiment = "NEUTRAL"
-            sentiment_display = f"Sentiment: {sentiment}"
+            sentiment_display = f"Sentiment: {sentiment}  ({scores['compound']:+.2f})"
             print(f"Sentence: '{sentence}' | Sentiment: {sentiment} | Scores: {scores}")
         else:
             print("Sentence is empty, nothing to analyze.")
