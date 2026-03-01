@@ -1,0 +1,31 @@
+# Large dataset image folders — not tracked in git
+asl_alphabet_train/
+asl_alphabet_test/
+
+# Collected landmark sequences
+phase_2_landmark/landmark_data/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# TensorFlow / Keras model caches
+*.h5
+*.keras
+
+# NumPy saved arrays (large)
+# *.npy  ← keep small ones like label_classes.npy; exclude if needed
+
+# OS files
+.DS_Store
+Thumbs.db
